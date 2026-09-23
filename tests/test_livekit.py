@@ -174,3 +174,128 @@ async def test_stream_batches_input_but_flush_and_end_preserve_utterances(server
         assert [len(chunk) for chunk in audio] == [3200, 1280, 1920]
         assert b"".join(audio) == b"".join(frames)
         assert sum(e.type == stt.SpeechEventType.FINAL_TRANSCRIPT for e in events) == 2
+
+
+async def test_usage_metrics_count_transmitted_audio_once(server):
+    async with server() as peer:
+        async with nari.STT(api_key="test", base_url=peer.ws_url) as provider:
+            metrics = []
+            provider.on("metrics_collected", metrics.append)
+            async with provider.stream() as stream:
+                for _ in range(7):
+                    stream.push_frame(audio())
+                stream.flush()
+                stream.end_input()
+                await collect(stream)
+            assert sum(m.audio_duration for m in metrics) == pytest.approx(0.14)
+            assert all(m.metadata.model_name == "qwen3-asr-fast" for m in metrics)
+
+
+async def test_cancel_does_not_count_unsent_tail(server):
+    async with server() as peer:
+        async with nari.STT(api_key="test", base_url=peer.ws_url) as provider:
+            metrics = []
+            provider.on("metrics_collected", metrics.append)
+            stream = provider.stream()
+            stream.push_frame(audio())
+            await peer.next_event("session.configure")
+            await stream.aclose()
+            assert not metrics
+
+
+async def test_prewarm_reuses_connection_without_synthesis(server):
+    import aiohttp
+
+    async with server() as peer, aiohttp.ClientSession() as http:
+        provider = nari.TTS(api_key="test", base_url=peer.http_url, http_session=http)
+        provider.prewarm()
+        await provider.warmup()
+        assert peer.warmup_calls == 1
+        assert peer.tts_calls == 0
+        async with provider.synthesize("Hello.") as output:
+            await collect(output)
+        assert peer.http_transports[0] is peer.http_transports[1]
+        await provider.aclose()
+        assert not http.closed
+
+
+async def test_close_cancels_pending_prewarm(server):
+    async with server() as peer:
+        peer.warmup_gate = asyncio.Event()
+        provider = nari.TTS(api_key="test", base_url=peer.http_url)
+        provider.prewarm()
+        task = provider._warmup_task
+        provider.prewarm()
+        assert provider._warmup_task is task
+        await asyncio.sleep(0.01)
+        await asyncio.wait_for(provider.aclose(), 1)
+        assert task.done()
+        assert provider._session is None
+
+
+async def test_initial_stt_recovery_keeps_queued_audio_and_usage(server):
+    async with server() as peer:
+        peer.ws_statuses = [503, 101]
+        async with nari.STT(api_key="test", base_url=peer.ws_url) as provider:
+            metrics = []
+            provider.on("metrics_collected", metrics.append)
+            async with provider.stream() as stream:
+                for _ in range(5):
+                    stream.push_frame(audio())
+                stream.end_input()
+                events = await collect(stream)
+            assert sum(m.audio_duration for m in metrics) == pytest.approx(0.1)
+            assert any(e.type == stt.SpeechEventType.FINAL_TRANSCRIPT for e in events)
+        assert peer.ws_attempts == 2
+        assert peer.connections == 1
+
+
+async def test_stt_disconnect_does_not_replay_inflight_audio(server):
+    from livekit.agents import APIConnectionError
+
+    async with server() as peer:
+        peer.ws_drop_after_audio = True
+        async with nari.STT(api_key="test", base_url=peer.ws_url) as provider:
+            async with provider.stream() as stream:
+                for _ in range(5):
+                    stream.push_frame(audio())
+                with pytest.raises(APIConnectionError) as error:
+                    await asyncio.wait_for(collect(stream), 2)
+                assert not error.value.retryable
+        assert peer.connections == 1
+
+
+async def test_tts_retry_is_per_request_without_replaying_previous_sentence(server):
+    async with server() as peer:
+        peer.tts_statuses = [200, 503, 200]
+        async with nari.TTS(api_key="test", base_url=peer.http_url) as provider:
+            async with provider.stream() as output:
+                output.push_text("Hello. Another sentence.")
+                output.end_input()
+                await collect(output)
+        texts = [body["input"] for _, body in peer.requests]
+        assert texts == ["Hello.", "Another sentence.", "Another sentence."]
+
+
+async def test_tts_mid_response_error_is_not_retried_by_livekit(server):
+    async with server() as peer:
+        peer.tts_abort = True
+        async with nari.TTS(api_key="test", base_url=peer.http_url) as provider:
+            async with provider.synthesize("Hello.") as output:
+                with pytest.raises(APIError) as error:
+                    await collect(output)
+                assert not error.value.retryable
+        assert peer.tts_calls == 1
+
+
+async def test_cancel_reports_sent_audio_but_not_the_buffered_tail(server):
+    async with server() as peer:
+        async with nari.STT(api_key="test", base_url=peer.ws_url) as provider:
+            metrics = []
+            provider.on("metrics_collected", metrics.append)
+            stream = provider.stream()
+            for _ in range(6):
+                stream.push_frame(audio())
+            await peer.next_event("input_audio_buffer.append")
+            await stream.aclose()
+            assert sum(m.audio_duration for m in metrics) == pytest.approx(0.1)

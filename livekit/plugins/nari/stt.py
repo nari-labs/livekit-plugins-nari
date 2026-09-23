@@ -6,7 +6,7 @@ import asyncio
 import weakref
 from typing import Any
 
-from livekit.agents import AgentSession, APIConnectOptions, APIError, UserStateChangedEvent, stt
+from livekit.agents import AgentSession, APIConnectOptions, UserStateChangedEvent, stt
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, NOT_GIVEN, NotGivenOr
 from livekit.agents.utils import AudioBuffer, is_given
 
@@ -14,6 +14,7 @@ from livekit import rtc
 
 from ._api import WS_URL, Realtime
 from ._api import api_key as resolve_api_key
+from ._errors import api_error
 
 
 class STT(stt.STT):
@@ -127,12 +128,28 @@ class RecognizeStream(stt.RecognizeStream):
         if is_given(language):
             self._config["language"] = language
         self._speaking = False
+        self._usage_bytes = 0
         super().__init__(stt=provider, conn_options=conn_options, sample_rate=16000)
 
     def push_frame(self, frame: rtc.AudioFrame) -> None:
         if frame.num_channels != 1:
             raise ValueError("Nari STT requires mono audio")
         super().push_frame(frame)
+
+    def _on_audio_sent(self, audio: bytes) -> None:
+        self._usage_bytes += len(audio)
+
+    def _report_usage(self, request_id: str) -> None:
+        if self._usage_bytes:
+            duration = self._usage_bytes / 32000
+            self._usage_bytes = 0
+            self._event_ch.send_nowait(
+                stt.SpeechEvent(
+                    type=stt.SpeechEventType.RECOGNITION_USAGE,
+                    request_id=request_id,
+                    recognition_usage=stt.RecognitionUsage(audio_duration=duration),
+                )
+            )
 
     async def _run(self) -> None:
         connection = Realtime(
@@ -141,6 +158,8 @@ class RecognizeStream(stt.RecognizeStream):
             config=self._config,
             timeout=self._conn_options.timeout,
             final_timeout=self._provider._final_timeout,
+            on_audio_sent=self._on_audio_sent,
+            max_retries=self._conn_options.max_retry,
         )
         tasks = []
         try:
@@ -169,11 +188,12 @@ class RecognizeStream(stt.RecognizeStream):
         except Exception as exc:
             # Replaying or skipping consumed audio on a fresh session would be
             # lossy. Let the application decide how to recover instead.
-            raise APIError(str(exc), retryable=False) from exc
+            raise api_error(exc) from exc
         finally:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            self._report_usage(connection.request_id)
             await connection.close()
 
     def _handle_event(self, event: dict, request_id: str) -> None:
@@ -207,6 +227,8 @@ class RecognizeStream(stt.RecognizeStream):
                     ],
                 )
             )
+            if final:
+                self._report_usage(request_id)
             # A duration boundary finalizes a segment, not the user's turn.
             if final and event.get("commit_reason") != "max_duration":
                 self._speaking = False

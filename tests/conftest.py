@@ -19,23 +19,42 @@ class FakeNari:
         self.audio_gate = None
         self.final_gate = None
         self.tts_status = 200
+        self.tts_statuses = []
+        self.ws_statuses = []
+        self.ws_attempts = 0
+        self.tts_retry_after = None
+        self.tts_abort = False
+        self.ws_drop_after_audio = False
         self.tts_complete = False
         self.tts_calls = 0
         self.tasks = []
+        self.warmup_calls = 0
+        self.warmup_gate = None
+        self.http_transports = []
+
+    async def voices(self, request):
+        self.warmup_calls += 1
+        self.http_transports.append(request.transport)
+        if self.warmup_gate:
+            await self.warmup_gate.wait()
+        return web.json_response({"voices": []})
 
     async def speech(self, request):
+        self.http_transports.append(request.transport)
         self.tts_calls += 1
         self.requests.append((dict(request.headers), await request.json()))
-        if self.tts_status != 200:
+        status = self.tts_statuses.pop(0) if self.tts_statuses else self.tts_status
+        if status != 200:
             return web.json_response(
                 {
                     "error": {
-                        "code": "INSUFFICIENT_CREDITS",
+                        "code": "INSUFFICIENT_CREDITS" if status == 402 else "INTERNAL_ERROR",
                         "message": "Add credits",
                         "requestId": "request-test",
                     }
                 },
-                status=self.tts_status,
+                status=status,
+                headers={"Retry-After": self.tts_retry_after} if self.tts_retry_after else {},
             )
         response = web.StreamResponse(
             headers={"Content-Type": "audio/pcm", "x-request-id": "request-test"}
@@ -43,6 +62,9 @@ class FakeNari:
         await response.prepare(request)
         # Split an int16 sample at an HTTP read boundary deliberately.
         await response.write(self.pcm[:961])
+        if self.tts_abort:
+            request.transport.close()
+            return response
         if self.audio_gate:
             await self.audio_gate.wait()
         await response.write(self.pcm[961:])
@@ -51,6 +73,19 @@ class FakeNari:
         return response
 
     async def realtime(self, request):
+        self.ws_attempts += 1
+        status = self.ws_statuses.pop(0) if self.ws_statuses else 101
+        if status != 101:
+            return web.json_response(
+                {
+                    "error": {
+                        "code": "INVALID_API_KEY" if status == 401 else "INTERNAL_ERROR",
+                        "message": "test",
+                        "requestId": "ws-rejected",
+                    }
+                },
+                status=status,
+            )
         self.connections += 1
         ws = web.WebSocketResponse()
         await ws.prepare(request)
@@ -65,6 +100,9 @@ class FakeNari:
                 await ws.send_json({"type": "session.configured", "session": event["session"]})
             elif event["type"] == "input_audio_buffer.append":
                 count += len(base64.b64decode(event["audio"]))
+                if self.ws_drop_after_audio:
+                    await ws.close()
+                    break
                 for text in ["I scream", "Ice cream"]:
                     await ws.send_json(
                         {
@@ -125,6 +163,7 @@ def server():
     async def run():
         peer = FakeNari()
         app = web.Application()
+        app.router.add_get("/v1/voices", peer.voices)
         app.router.add_post("/v1/audio/speech", peer.speech)
         app.router.add_get("/v1/realtime", peer.realtime)
         runner = web.AppRunner(app, shutdown_timeout=0.1)

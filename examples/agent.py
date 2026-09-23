@@ -18,6 +18,7 @@ async def entrypoint(ctx: JobContext):
         model=os.getenv("NARI_TTS_MODEL", "qwen3-tts-fast"),
         voice=os.getenv("NARI_VOICE", "diana"),
     )
+    synthesizer.prewarm()
     session = AgentSession(
         vad=silero.VAD.load(min_silence_duration=0.2),
         stt=recognizer,

@@ -6,8 +6,11 @@ import asyncio
 import base64
 import json
 import os
+import random
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import aiohttp
@@ -22,12 +25,23 @@ STT_CHUNK_BYTES = 3200  # 100 ms of 16 kHz mono PCM16.
 class NariError(Exception):
     """Provider error with a support request ID, without request credentials."""
 
-    def __init__(self, code: str, message: str, *, request_id: str = "", status: int = 0):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        request_id: str = "",
+        status: int = 0,
+        retry_after: float = 0,
+    ):
         self.code, self.request_id, self.status = code, request_id, status
+        self.retry_after = retry_after
         super().__init__(f"{code}: {message}" + (f" (request {request_id})" if request_id else ""))
 
     @classmethod
-    def from_body(cls, body: Any, *, request_id: str = "", status: int = 0) -> NariError:
+    def from_body(
+        cls, body: Any, *, request_id: str = "", status: int = 0, retry_after: float = 0
+    ) -> NariError:
         error = body.get("error", {}) if isinstance(body, dict) else {}
         if not isinstance(error, dict):
             error = {}
@@ -36,7 +50,92 @@ class NariError(Exception):
             error.get("message", "Nari request failed"),
             request_id=error.get("requestId", request_id),
             status=status,
+            retry_after=retry_after,
         )
+
+
+_TRANSIENT_CODES = frozenset(
+    {
+        "UPSTREAM_UNAVAILABLE",
+        "SERVICE_UNAVAILABLE",
+        "AUTH_BACKEND_UNAVAILABLE",
+        "RATE_LIMIT_UNAVAILABLE",
+        "REQUEST_GATE_UNAVAILABLE",
+        "VOICE_CATALOG_UNAVAILABLE",
+        "USAGE_QUEUE_UNAVAILABLE",
+        "ENTITLEMENT_UNAVAILABLE",
+        "SERVER_NOT_READY",
+        "SERVER_AT_CAPACITY",
+        "SERVER_DRAINING",
+        "INTERNAL_ERROR",
+        "VAD_OVERLOADED",
+        "VAD_UNAVAILABLE",
+        "VAD_RUNTIME_ERROR",
+    }
+)
+
+
+def error_kind(exc: Exception) -> str:
+    """Provider-independent classification; recovery also depends on stream progress."""
+    if isinstance(exc, NariError):
+        if exc.code == "INVALID_API_KEY" or exc.status == 401:
+            return "authentication"
+        if exc.code == "INSUFFICIENT_CREDITS" or exc.status == 402:
+            return "quota"
+        if exc.status == 403:
+            return "authorization"
+        if exc.status == 429 or exc.code == "RATE_LIMIT_EXCEEDED":
+            return "rate_limit"
+        if (
+            exc.code in {"CONNECTION_CLOSED", "FINAL_TIMEOUT", "SESSION_IDLE_TIMEOUT"}
+            or exc.status == 408
+        ):
+            return "connectivity"
+        if 400 <= exc.status < 500:
+            return "invalid_request"
+        if exc.code in _TRANSIENT_CODES or 500 <= exc.status < 600:
+            return "server"
+        if exc.code in {
+            "INVALID_REQUEST",
+            "MODEL_NOT_FOUND",
+            "SESSION_CONFIGURATION_LOCKED",
+            "MESSAGE_TOO_LARGE",
+            "UNSUPPORTED_LANGUAGE",
+            "SESSION_SETUP_TIMEOUT",
+        }:
+            return "invalid_request"
+        return "unknown"
+    if isinstance(exc, (aiohttp.ClientError, OSError, TimeoutError, ConnectionClosed)):
+        return "connectivity"
+    if isinstance(exc, ValueError):
+        return "invalid_request"
+    return "unknown"
+
+
+def validate_retries(value: int) -> None:
+    if type(value) is not int or value < 0:
+        raise ValueError("max_retries must be a nonnegative integer")
+
+
+def retry_after_seconds(value: str | None) -> float:
+    try:
+        return max(0, float(value or "0"))
+    except ValueError:
+        try:
+            return max(0, (parsedate_to_datetime(value) - datetime.now(UTC)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+
+async def retry_wait(exc: Exception, attempt: int, max_retries: int) -> bool:
+    """Bounded exponential backoff; never retry sooner than Retry-After."""
+    if attempt >= max_retries or error_kind(exc) not in {"server", "connectivity", "rate_limit"}:
+        return False
+    delay = max(0.25 * 2**attempt + random.uniform(0, 0.1), getattr(exc, "retry_after", 0))
+    if delay > 5:  # Leave longer recovery to the application rather than stall the voice turn.
+        return False
+    await asyncio.sleep(delay)
+    return True
 
 
 def api_key(value: str | None) -> str:
@@ -75,45 +174,91 @@ async def speech_chunks(
     seed: int,
     timeout: float,
     connect_timeout: float = 10,
+    max_retries: int = 2,
 ) -> AsyncIterator[tuple[str, bytes]]:
     """Stream whole PCM16 samples. Never retry a partially delivered sentence."""
+    validate_retries(max_retries)
     for part in split_text(text):
-        body = dict(
-            model=model, voice=voice, input=part, seed=seed, response_format="pcm", stream=True
-        )
-        if language is not None:
-            body["language"] = language
-        async with session.post(
-            base_url.rstrip("/") + "/audio/speech",
-            json=body,
-            headers={"Authorization": f"Bearer {key}"},
-            allow_redirects=False,
-            timeout=aiohttp.ClientTimeout(
-                total=None, sock_connect=connect_timeout, sock_read=timeout
-            ),
-        ) as response:
-            request_id = response.headers.get("x-request-id", "")
-            if response.status != 200:
-                try:
-                    body = await response.json()
-                except (ValueError, aiohttp.ContentTypeError):
-                    body = {}
-                raise NariError.from_body(body, request_id=request_id, status=response.status)
-            if response.content_type != "audio/pcm":
-                raise NariError("INVALID_AUDIO", "Expected audio/pcm", request_id=request_id)
-            tail = b""
-            received = False
-            async for chunk in response.content.iter_chunked(4800):
-                chunk = tail + chunk
-                size = len(chunk) // 2 * 2
-                tail = chunk[size:]
-                if size:
-                    received = True
-                    yield request_id, chunk[:size]
-            if tail or not received:
-                raise NariError(
-                    "INCOMPLETE_AUDIO", "Empty or truncated PCM16 response", request_id=request_id
+        for attempt in range(max_retries + 1):
+            response_started = False
+            try:
+                body = dict(
+                    model=model,
+                    voice=voice,
+                    input=part,
+                    seed=seed,
+                    response_format="pcm",
+                    stream=True,
                 )
+                if language is not None:
+                    body["language"] = language
+                async with session.post(
+                    base_url.rstrip("/") + "/audio/speech",
+                    json=body,
+                    headers={"Authorization": f"Bearer {key}"},
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(
+                        total=None, sock_connect=connect_timeout, sock_read=timeout
+                    ),
+                ) as response:
+                    request_id = response.headers.get("x-request-id", "")
+                    if response.status != 200:
+                        try:
+                            body = await response.json()
+                        except (ValueError, aiohttp.ContentTypeError):
+                            body = {}
+                        raise NariError.from_body(
+                            body,
+                            request_id=request_id,
+                            status=response.status,
+                            retry_after=retry_after_seconds(response.headers.get("Retry-After")),
+                        )
+                    response_started = True
+                    if response.content_type != "audio/pcm":
+                        raise NariError(
+                            "INVALID_AUDIO", "Expected audio/pcm", request_id=request_id
+                        )
+                    tail = b""
+                    received = False
+                    async for chunk in response.content.iter_chunked(4800):
+                        chunk = tail + chunk
+                        size = len(chunk) // 2 * 2
+                        tail = chunk[size:]
+                        if size:
+                            received = True
+                            yield request_id, chunk[:size]
+                    if tail or not received:
+                        raise NariError(
+                            "INCOMPLETE_AUDIO",
+                            "Empty or truncated PCM16 response",
+                            request_id=request_id,
+                        )
+                break
+            except Exception as exc:
+                # A 200 response may already have generated/played audio. No resume
+                # offset exists, so never retry that request, even before the first yield.
+                if response_started or not await retry_wait(exc, attempt, max_retries):
+                    raise
+
+
+async def warm_http(session: aiohttp.ClientSession, *, key: str, base_url: str, model: str) -> None:
+    """Establish a reusable HTTP connection without generating billable audio."""
+    async with session.get(
+        base_url.rstrip("/") + "/voices",
+        params={"model": model},
+        headers={"Authorization": f"Bearer {key}"},
+        allow_redirects=False,
+        timeout=aiohttp.ClientTimeout(total=5),
+    ) as response:
+        if response.status != 200:
+            try:
+                body = await response.json()
+            except (ValueError, aiohttp.ContentTypeError):
+                body = {}
+            raise NariError.from_body(
+                body, status=response.status, request_id=response.headers.get("x-request-id", "")
+            )
+        await response.read()  # Consume the response so the connection returns to the pool.
 
 
 class Realtime:
@@ -124,11 +269,22 @@ class Realtime:
     """
 
     def __init__(
-        self, *, key: str, url: str, config: dict, timeout: float = 10, final_timeout: float = 15
+        self,
+        *,
+        key: str,
+        url: str,
+        config: dict,
+        timeout: float = 10,
+        final_timeout: float = 15,
+        on_audio_sent: Callable[[bytes], None] | None = None,
+        max_retries: int = 2,
     ):
+        validate_retries(max_retries)
+        self._max_retries = max_retries
         if timeout <= 0 or final_timeout <= 0:
             raise ValueError("Timeouts must be positive")
         self.key, self.url, self.config = key, url, config
+        self._on_audio_sent = on_audio_sent
         self.timeout, self.final_timeout = timeout, final_timeout
         self.ws = None
         self.request_id = ""
@@ -143,6 +299,16 @@ class Realtime:
         self._send_lock = asyncio.Lock()
 
     async def open(self) -> None:
+        for attempt in range(self._max_retries + 1):
+            try:
+                await self._open_once()
+                return
+            except Exception as exc:
+                if not await retry_wait(exc, attempt, self._max_retries):
+                    raise
+
+    async def _open_once(self) -> None:
+        self.request_id = ""
         try:
             self.ws = await connect(
                 self.url,
@@ -168,6 +334,7 @@ class Realtime:
                 body,
                 status=exc.response.status_code,
                 request_id=exc.response.headers.get("x-request-id", ""),
+                retry_after=retry_after_seconds(exc.response.headers.get("Retry-After")),
             ) from None
         except BaseException:
             await self.close()
@@ -196,6 +363,8 @@ class Realtime:
                 }
             )
         )
+        if self._on_audio_sent is not None:
+            self._on_audio_sent(audio)
 
     async def commit(self) -> None:
         # Keep the tail and its commit adjacent even if a VAD callback races
@@ -277,6 +446,13 @@ class Realtime:
             raise self.failure
 
     async def close(self) -> None:
+        if self._pending and self.failure is None:
+            self.failure = NariError(
+                "CONNECTION_CLOSED",
+                "Session closed before final transcripts",
+                request_id=self.request_id,
+            )
+        self._drained.set()
         # Cancellation discards unsent audio; only an explicit commit flushes it.
         self._audio_buffer.clear()
         if self._watchdog:

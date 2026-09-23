@@ -113,3 +113,40 @@ VAD boundaries and graceful end. Original input frames remain unchanged.
 The headless AgentSession/Silero test also passed again with 20 ms input:
 `speaking -> partials -> listening -> final`. STT batching did not require changing
 VAD input frames or manually injecting a speech-end event.
+
+
+## Metrics, warmup and recovery validation
+
+The local suite passes 40 tests on Python 3.12.13, with lint, formatting, package
+build and example CLI checks passing. The headless `scripts/vad_smoke.py` test
+was also rerun against the Fast API: real Silero VAD produced speaking/listening
+transitions, partial transcripts and the correct final transcript. This does
+not exercise browser playback or an LLM conversation.
+
+20 ms caller input, automatic 100 ms STT transmission, Fast models and the same
+short phrase were used. Each framework ran one cold synthesis in a new process,
+then another process explicitly awaited `warmup()` before three syntheses.
+All runs produced partials and correct final transcripts. Framework STT usage
+matched the resampled transmitted PCM duration in every run.
+
+| Mode | First TTS frame (ms) | Preparation before TTS (ms) | Reported STT audio (s) |
+| --- | ---: | ---: | ---: |
+| cold | 240.25 | — | 3.013 |
+| prepared, run 1 | 98.59 | 190.35 | 3.013 |
+| prepared, run 2 | 96.85 | 190.35 | 3.013 |
+| prepared, run 3 | 95.88 | 190.35 | 3.013 |
+
+Preparation ran once per process; its duration is repeated in the JSON for
+context. Preparation moves connection setup ahead of the first response, not
+out of total application startup time. These are small network-inclusive smoke
+samples, not latency guarantees. See [raw results](hardening-results.json).
+
+Local tests additionally verify bounded transient retries, authentication/credit
+fail-fast behavior, Retry-After budgets, cancellation during backoff, no replay
+after HTTP 200 or in-flight STT loss, connection reuse after warmup, external
+HTTP ownership and cancelling unfinished warmup. Faults are injected by the local
+peer; production failures were not deliberately induced.
+
+LiveKit `metrics_collected` tests cover normal completion, repeated commits,
+initial reconnect success, and sent versus unsent audio at cancellation. A
+multi-sentence TTS failure retries only the rejected sentence, not prior speech.

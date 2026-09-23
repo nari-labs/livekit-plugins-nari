@@ -16,6 +16,11 @@ async def run(args):
     load_dotenv(args.env_file)
     chunk_bytes = 16000 * 2 * args.chunk_ms // 1000
     async with nari.TTS(model=args.tts_model, voice=args.voice) as speaker:
+        warmup_ms = None
+        if args.prewarm:
+            warmup_started = time.perf_counter()
+            await speaker.warmup()
+            warmup_ms = (time.perf_counter() - warmup_started) * 1000
         for index in range(args.runs):
             started = time.perf_counter()
             first = None
@@ -36,7 +41,9 @@ async def run(args):
             committed_at = None
             final_at = None
             transcript = ""
+            usage_metrics = []
             async with nari.STT(model=args.stt_model) as recognizer:
+                recognizer.on("metrics_collected", usage_metrics.append)
                 async with recognizer.stream() as output:
                     audio_started = time.perf_counter()
 
@@ -89,6 +96,10 @@ async def run(args):
                         "stt_model": args.stt_model,
                         "stt_chunk_ms": args.chunk_ms,  # Caller input, before adapter batching.
                         "stt_wire_chunk_ms": 100,
+                        "prewarm_ms": round(warmup_ms, 2) if warmup_ms is not None else None,
+                        "stt_audio_sent_seconds": round(
+                            sum(m.audio_duration for m in usage_metrics), 4
+                        ),
                         "tts_first_frame_ms": round((first - started) * 1000, 2),
                         "tts_complete_ms": round(synthesis_ms, 2),
                         "audio_seconds": round(len(pcm) / 32000, 3),
@@ -107,6 +118,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", default=".env")
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--prewarm", action="store_true")
     parser.add_argument("--chunk-ms", type=int, choices=(20, 100), default=100)
     parser.add_argument("--tts-model", default="qwen3-tts-fast")
     parser.add_argument("--stt-model", default="qwen3-asr-fast")

@@ -102,15 +102,45 @@ include `item_id` and `commit_reason` in `SpeechData.metadata`. A 36-second
 `max_duration` boundary yields a final segment without an end-of-speech event.
 `commit_empty` never discards earlier pending finals.
 
-Connection/configuration errors, missing finals, or incomplete PCM streams
-surface as LiveKit API errors. This preview does not automatically retry or
-replay failed requests: an interrupted utterance cannot resume, and retrying
-partially played TTS would repeat speech. Configure application-level recovery
-or a fallback provider. Error messages preserve Nari request IDs when available.
+Errors preserve provider codes/request IDs and map to LiveKit status, timeout,
+or connection errors. Retries happen inside the adapter, before STT starts
+consuming audio or before TTS receives HTTP 200. The limit is
+`APIConnectOptions.max_retry` (LiveKit default: 3 retries); set it to zero to
+disable. Backoff starts at 250 ms, doubles, and adds up to 100 ms jitter.
+`Retry-After` is honored; waits over five seconds are surfaced to the application
+instead of retrying early. Timeout settings apply per attempt. Exhausted failures
+are not retried again by LiveKit, which would replay an entire stream.
+
+Authentication, credits and invalid requests are not retried. A started TTS
+response is never replayed, even if it fails before the first PCM chunk. Each
+long-text/sentence request has its own retry budget, so earlier speech is not
+repeated. STT disconnection or missing finals ends that stream with an error;
+keep already received finals and explicitly start a new stream or use a fallback.
+No incomplete utterance is silently resumed or replayed.
 Batch recognition, diarization, and word timestamps are not exposed in this release.
 
 Close the STT/TTS instances when the session ends; the example registers a
 shutdown callback. Externally supplied HTTP sessions remain caller-owned.
+
+## Metrics and connection preparation
+
+Subscribe to `recognizer.on("metrics_collected", handler)` for standard LiveKit
+STT usage. The plugin emits `RECOGNITION_USAGE` increments on finals and stream
+teardown, tagged with the connection request ID and model/provider metadata.
+`audio_duration` measures PCM successfully written to the WebSocket, including
+silence. It excludes locally buffered tails discarded on cancellation. These
+increments are client transport observations, not proof of server acceptance or
+invoice amounts. TTS retains LiveKit's standard metrics. The separate smoke
+script measures commit-to-final latency; STT usage events do not supply that
+latency measurement.
+
+Call `synthesizer.prewarm()` for background preparation (used in the example),
+or `await synthesizer.warmup()` to wait explicitly and receive any warmup error.
+Preparation uses authenticated `GET /v1/voices?model=...` on the same HTTP pool;
+it generates no speech. It has a five-second total timeout. Background errors
+are logged, and later synthesis remains possible. Concurrent warmup calls share
+the active task; closing the provider cancels it. An external HTTP session is
+never closed by the plugin.
 
 ## Test and measure
 
@@ -119,7 +149,7 @@ uv run ruff check .
 uv run pytest -q
 uv build
 # Uses paid Nari API calls; prints timings and the known test phrase, never the key:
-uv run --extra examples python scripts/smoke.py --env-file .env --runs 3 --chunk-ms 100
+uv run --extra examples python scripts/smoke.py --env-file .env --runs 3 --chunk-ms 20 --prewarm
 # Headless AgentSession with real Silero VAD (also uses paid API calls):
 uv run --extra examples python scripts/vad_smoke.py --env-file .env
 ```
