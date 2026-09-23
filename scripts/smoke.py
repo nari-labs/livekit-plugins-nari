@@ -87,7 +87,8 @@ async def run(args):
                         "framework": "livekit",
                         "tts_model": args.tts_model,
                         "stt_model": args.stt_model,
-                        "stt_chunk_ms": args.chunk_ms,
+                        "stt_chunk_ms": args.chunk_ms,  # Caller input, before adapter batching.
+                        "stt_wire_chunk_ms": 100,
                         "tts_first_frame_ms": round((first - started) * 1000, 2),
                         "tts_complete_ms": round(synthesis_ms, 2),
                         "audio_seconds": round(len(pcm) / 32000, 3),

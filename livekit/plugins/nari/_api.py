@@ -16,6 +16,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 API_URL = "https://api.narilabs.com/v1"
 WS_URL = "wss://api.narilabs.com/v1/realtime?intent=transcription"
+STT_CHUNK_BYTES = 3200  # 100 ms of 16 kHz mono PCM16.
 
 
 class NariError(Exception):
@@ -138,6 +139,8 @@ class Realtime:
         self._drained.set()
         self._watchdog: asyncio.Task | None = None
         self._sequence = 0
+        self._audio_buffer = bytearray()
+        self._send_lock = asyncio.Lock()
 
     async def open(self) -> None:
         try:
@@ -175,27 +178,44 @@ class Realtime:
             return
         if len(audio) % 2:
             raise ValueError("Audio must contain whole PCM16 samples")
-        if self.failure:
-            raise self.failure
-        # Stay well under the 128 KiB JSON message limit, including base64 overhead.
-        for start in range(0, len(audio), 32000):
-            await self.ws.send(
-                json.dumps(
-                    {
-                        "type": "input_audio_buffer.append",
-                        "audio": base64.b64encode(audio[start : start + 32000]).decode("ascii"),
-                    }
-                )
+        async with self._send_lock:
+            if self.failure:
+                raise self.failure
+            self._audio_buffer.extend(audio)
+            while len(self._audio_buffer) >= STT_CHUNK_BYTES:
+                chunk = bytes(self._audio_buffer[:STT_CHUNK_BYTES])
+                del self._audio_buffer[:STT_CHUNK_BYTES]
+                await self._send_audio(chunk)
+
+    async def _send_audio(self, audio: bytes) -> None:
+        await self.ws.send(
+            json.dumps(
+                {
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(audio).decode("ascii"),
+                }
             )
+        )
 
     async def commit(self) -> None:
-        if self.failure:
-            raise self.failure
-        self._sequence += 1
-        event_id = f"commit_{self._sequence}"
-        self._pending["commit:" + event_id] = asyncio.get_running_loop().time() + self.final_timeout
-        self._update_waiters()
-        await self.ws.send(json.dumps({"type": "input_audio_buffer.commit", "event_id": event_id}))
+        # Keep the tail and its commit adjacent even if a VAD callback races
+        # with the next input frame. There is no timer or silence padding.
+        async with self._send_lock:
+            if self.failure:
+                raise self.failure
+            if self._audio_buffer:
+                tail = bytes(self._audio_buffer)
+                self._audio_buffer.clear()
+                await self._send_audio(tail)
+            self._sequence += 1
+            event_id = f"commit_{self._sequence}"
+            self._pending["commit:" + event_id] = (
+                asyncio.get_running_loop().time() + self.final_timeout
+            )
+            self._update_waiters()
+            await self.ws.send(
+                json.dumps({"type": "input_audio_buffer.commit", "event_id": event_id})
+            )
 
     def _update_waiters(self) -> None:
         self._changed.set()
@@ -257,6 +277,8 @@ class Realtime:
             raise self.failure
 
     async def close(self) -> None:
+        # Cancellation discards unsent audio; only an explicit commit flushes it.
+        self._audio_buffer.clear()
         if self._watchdog:
             self._watchdog.cancel()
             await asyncio.gather(self._watchdog, return_exceptions=True)

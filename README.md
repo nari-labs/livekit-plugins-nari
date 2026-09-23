@@ -73,8 +73,11 @@ only documented Nari request fields.
 
 ## Latency behavior
 
-- Audio is forwarded continuously to STT without waiting for a full utterance.
-- A VAD boundary queues a commit immediately; there is no plugin debounce timer.
+- STT input is accumulated into 100 ms (3,200-byte) PCM16 WebSocket messages.
+  This happens inside the plugin regardless of the caller's input frame size.
+  LiveKit VAD still receives the original frames.
+- A VAD boundary sends the remaining short audio chunk before committing,
+  without padding or waiting for another full chunk. There is no debounce timer.
 - TTS starts each completed sentence while the LLM continues generating. The
   default tokenizer does not merge short sentences to meet a minimum length.
 - The plugin implements its own LiveKit text stream, avoiding the generic
@@ -136,8 +139,11 @@ release, review package names/version bounds, run microphone and interruption
 acceptance tests, publish the package, and then propose the upstream plugin.
 
 The API smoke script defaults to `--chunk-ms 100` (3,200 bytes of 16 kHz
-mono PCM16). Use `--chunk-ms 20` for comparison. Each chunk is sent after its
-simulated capture interval; the short final chunk is sent without padding and
-committed immediately. This option changes the smoke test input, not the adapter's
-production buffering: the adapter continues forwarding frames supplied by its caller.
+mono PCM16). Use `--chunk-ms 20` to exercise automatic batching of smaller
+inputs. Each chunk is sent after its simulated capture interval; the short final chunk is sent without padding and
+committed immediately. This option controls the smoke test input frame size;
+the adapter now always batches STT transmission into 100 ms chunks, flushing shorter tails on
+commit. JSON reports the input size as `stt_chunk_ms` and the regular WebSocket
+chunk size as `stt_wire_chunk_ms`. Cancelling/closing discards unsent tails;
+graceful end commits them.
 See the [chunk-size comparison](docs/validation.md#100-ms-chunk-retest).

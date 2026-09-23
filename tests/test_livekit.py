@@ -1,4 +1,5 @@
 import asyncio
+import base64
 
 import pytest
 from livekit.agents import AgentSession, APIError, UserStateChangedEvent, stt
@@ -48,7 +49,7 @@ async def test_livekit_vad_state_commits_without_ending_user_turn(server):
             provider.bind(session)  # Idempotent registration.
             async with provider.stream() as stream:
                 stream.push_frame(audio())
-                await peer.next_event("input_audio_buffer.append")
+                await peer.next_event("session.configure")
                 session.emit(
                     "user_state_changed",
                     UserStateChangedEvent(old_state="speaking", new_state="listening"),
@@ -144,3 +145,32 @@ async def test_auth_or_credit_error_is_not_retried(server):
                 with pytest.raises(APIError, match="INSUFFICIENT_CREDITS"):
                     await collect(stream)
         assert peer.tts_calls == 1
+
+
+async def test_stream_batches_input_but_flush_and_end_preserve_utterances(server):
+    async with server() as peer:
+        async with nari.STT(api_key="test", base_url=peer.ws_url) as provider:
+            async with provider.stream() as stream:
+                frames = [bytes([i, 0]) * 320 for i in range(10)]
+                for index, data in enumerate(frames):
+                    stream.push_frame(
+                        rtc.AudioFrame(
+                            data=data, sample_rate=16000, num_channels=1, samples_per_channel=320
+                        )
+                    )
+                    if index == 6:
+                        stream.flush()
+                stream.end_input()
+                events = await asyncio.wait_for(collect(stream), 2)
+        wire = [e for _, e in peer.requests if e["type"] != "session.configure"]
+        assert [e["type"] for e in wire] == [
+            "input_audio_buffer.append",
+            "input_audio_buffer.append",
+            "input_audio_buffer.commit",
+            "input_audio_buffer.append",
+            "input_audio_buffer.commit",
+        ]
+        audio = [base64.b64decode(e["audio"]) for e in wire if "audio" in e]
+        assert [len(chunk) for chunk in audio] == [3200, 1280, 1920]
+        assert b"".join(audio) == b"".join(frames)
+        assert sum(e.type == stt.SpeechEventType.FINAL_TRANSCRIPT for e in events) == 2

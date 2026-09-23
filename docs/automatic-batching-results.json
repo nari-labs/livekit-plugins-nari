@@ -1,0 +1,44 @@
+[
+  {
+    "run": 1,
+    "framework": "livekit",
+    "tts_model": "qwen3-tts-fast",
+    "stt_model": "qwen3-asr-fast",
+    "stt_chunk_ms": 20,
+    "stt_wire_chunk_ms": 100,
+    "tts_first_frame_ms": 241.27,
+    "tts_complete_ms": 440.89,
+    "audio_seconds": 3.013,
+    "stt_first_partial_ms": 1915.6,
+    "stt_commit_to_final_ms": 96.3,
+    "transcript": "Hello. This is a test of Nari speech recognition."
+  },
+  {
+    "run": 2,
+    "framework": "livekit",
+    "tts_model": "qwen3-tts-fast",
+    "stt_model": "qwen3-asr-fast",
+    "stt_chunk_ms": 20,
+    "stt_wire_chunk_ms": 100,
+    "tts_first_frame_ms": 109.86,
+    "tts_complete_ms": 321.7,
+    "audio_seconds": 3.013,
+    "stt_first_partial_ms": 1915.28,
+    "stt_commit_to_final_ms": 91.47,
+    "transcript": "Hello. This is a test of Nari speech recognition."
+  },
+  {
+    "run": 3,
+    "framework": "livekit",
+    "tts_model": "qwen3-tts-fast",
+    "stt_model": "qwen3-asr-fast",
+    "stt_chunk_ms": 20,
+    "stt_wire_chunk_ms": 100,
+    "tts_first_frame_ms": 102.66,
+    "tts_complete_ms": 302.81,
+    "audio_seconds": 3.013,
+    "stt_first_partial_ms": 1911.5,
+    "stt_commit_to_final_ms": 82.58,
+    "transcript": "Hello. This is a test of Nari speech recognition."
+  }
+]

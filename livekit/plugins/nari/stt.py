@@ -23,6 +23,7 @@ class STT(stt.STT):
     Its speaking-to-listening events commit transcription, while LiveKit keeps
     ownership of semantic turn detection and interruptions. Standalone clients
     call ``stream.flush()`` explicitly. Server VAD remains an opt-in alternative.
+    STT transmission batches into 100 ms chunks and flushes the tail on commit.
     Create one STT instance per AgentSession.
     """
 

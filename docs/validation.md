@@ -61,6 +61,9 @@ The recognized phrase matched the input. No LLM or room transport was involved.
 
 ## 100 ms chunk retest
 
+Historical comparison before automatic batching was added to the adapter.
+At that revision, caller input sizes also controlled WebSocket message sizes.
+
 The same Fast models, voice and short phrase were rerun three times per chunk
 size, sequentially without concurrent test load. The test script now defaults
 to 100 ms; 20 ms remains selectable. Both sizes use corrected capture pacing:
@@ -88,3 +91,25 @@ so those partial offsets should not be compared directly between frameworks.
 A further 14.3-second utterance with 100 ms chunks also
 returned a partial and the correct full final transcript. Commit to final was
 93.14 ms (one run).
+
+
+## Automatic 100 ms batching acceptance
+
+The production adapter now sends 100 ms STT messages even when callers supply
+20 ms audio frames. `scripts/smoke.py --chunk-ms 20 --runs 3` exercised the actual
+adapter against the Fast API after this change. All three short-phrase runs
+produced live partials and correct final transcripts.
+
+Commit to final: 96.30, 91.47, 82.58 ms; median 91.47 ms.
+These are small network-inclusive smoke samples, not a statistical benchmark.
+Raw measurements: [automatic-batching-results.json](automatic-batching-results.json).
+
+Local HTTP/WebSocket tests inspect actual outbound message bytes: five 20 ms
+frames make one 3,200-byte append; a partial tail precedes commit without padding;
+consecutive utterances have no loss, duplication or cross-turn tail mixing;
+cancellation discards an unsent tail. The framework tests exercise explicit
+VAD boundaries and graceful end. Original input frames remain unchanged.
+
+The headless AgentSession/Silero test also passed again with 20 ms input:
+`speaking -> partials -> listening -> final`. STT batching did not require changing
+VAD input frames or manually injecting a speech-end event.

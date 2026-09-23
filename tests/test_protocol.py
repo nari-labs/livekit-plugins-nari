@@ -22,6 +22,7 @@ async def test_large_audio_is_split_below_json_limit(server):
         try:
             audio = b"\0\0" * 100000
             await connection.append(audio)
+            await connection.commit()  # Flush a final chunk shorter than 100 ms.
             count = 0
             while count < len(audio):
                 event = await peer.next_event("input_audio_buffer.append")
@@ -71,3 +72,47 @@ async def test_error_event_stops_pending_drain(server):
                 await asyncio.wait_for(connection.drain(), 0.2)
         finally:
             await connection.close()
+
+
+async def test_small_frames_form_100ms_messages_and_commit_flushes_tail(server):
+    async with server() as peer:
+        connection = Realtime(key="test", url=peer.ws_url, config={"model": "qwen3-asr-fast"})
+        await connection.open()
+        try:
+            await peer.next_event("session.configure")
+            frames = [bytes([i, 0]) * 320 for i in range(1, 8)]
+            for frame in frames[:4]:
+                await connection.append(frame)
+            # Less than 100 ms stays local, without sending a premature message.
+            await asyncio.sleep(0.01)
+            assert peer.events.empty()
+            await connection.append(frames[4])
+            first = await peer.next_event("input_audio_buffer.append")
+            assert base64.b64decode(first["audio"]) == b"".join(frames[:5])
+            for frame in frames[5:]:
+                await connection.append(frame)
+            await connection.commit()
+            tail = await peer.next_event("input_audio_buffer.append")
+            assert base64.b64decode(tail["audio"]) == b"".join(frames[5:])
+            assert (await peer.events.get())["type"] == "input_audio_buffer.commit"
+            # A second utterance and an empty commit must not replay the first tail.
+            await connection.append(frames[0])
+            await connection.commit()
+            next_tail = await peer.next_event("input_audio_buffer.append")
+            assert base64.b64decode(next_tail["audio"]) == frames[0]
+            assert (await peer.events.get())["type"] == "input_audio_buffer.commit"
+            await connection.commit()
+            assert (await asyncio.wait_for(peer.events.get(), 2))["type"] == (
+                "input_audio_buffer.commit"
+            )
+        finally:
+            await connection.close()
+
+
+async def test_close_discards_unsent_tail(server):
+    async with server() as peer:
+        connection = Realtime(key="test", url=peer.ws_url, config={"model": "qwen3-asr-fast"})
+        await connection.open()
+        await connection.append(b"\1\0" * 320)
+        await connection.close()
+        assert [event["type"] for _, event in peer.requests] == ["session.configure"]
