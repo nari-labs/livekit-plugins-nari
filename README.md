@@ -116,7 +116,7 @@ uv run ruff check .
 uv run pytest -q
 uv build
 # Uses paid Nari API calls; prints timings and the known test phrase, never the key:
-uv run --extra examples python scripts/smoke.py --env-file .env --runs 3
+uv run --extra examples python scripts/smoke.py --env-file .env --runs 3 --chunk-ms 100
 # Headless AgentSession with real Silero VAD (also uses paid API calls):
 uv run --extra examples python scripts/vad_smoke.py --env-file .env
 ```
@@ -134,3 +134,10 @@ CI runs lint, local HTTP/WebSocket tests, and package builds. Publishing is
 deliberately not automated while the repository is private. Before a public
 release, review package names/version bounds, run microphone and interruption
 acceptance tests, publish the package, and then propose the upstream plugin.
+
+The API smoke script defaults to `--chunk-ms 100` (3,200 bytes of 16 kHz
+mono PCM16). Use `--chunk-ms 20` for comparison. Each chunk is sent after its
+simulated capture interval; the short final chunk is sent without padding and
+committed immediately. This option changes the smoke test input, not the adapter's
+production buffering: the adapter continues forwarding frames supplied by its caller.
+See the [chunk-size comparison](docs/validation.md#100-ms-chunk-retest).

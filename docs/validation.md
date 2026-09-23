@@ -3,7 +3,7 @@
 Environment: Linux, Python 3.12.13, LiveKit Agents 1.8.2. API credentials were
 loaded from an external `.env`; no credentials are included in this repository.
 
-## Real Nari API
+## Initial real Nari API test (20 ms chunks)
 
 Requested TTS model: `qwen3-tts-fast`, voice: `diana`.
 Requested STT session model: `qwen3-asr-fast`, manual commit, 16 kHz PCM16 mono.
@@ -26,7 +26,8 @@ TTS 1204.82 ms, STT commit to final 197.78 ms.
 **No partial transcript events were observed in these live runs**, including
 the longer utterance. The public protocol permits finals without partials.
 Partial-event translation is covered by the local WebSocket tests; its delivery
-from the deployed API remains unverified. The adapter does not wait for partials.
+from the deployed API was unverified in this initial test. See the 100 ms retest
+below, which did receive live partials. The adapter does not wait for partials.
 
 These small samples are smoke tests, not p50/p95/p99 benchmarks or server-only
 latency claims. Timings include network and client processing. STT measurements
@@ -56,5 +57,34 @@ The recognized phrase matched the input. No LLM or room transport was involved.
 - Full microphone/speaker conversation and room transport playback.
 - Semantic turn detector behavior with real multi-turn speech.
 - End-to-end interruption audibility in a deployed agent.
-- Partial transcripts from the deployed API, if that deployment enables them.
 - Broader language/voice coverage and statistically meaningful load benchmarks.
+
+## 100 ms chunk retest
+
+The same Fast models, voice and short phrase were rerun three times per chunk
+size, sequentially without concurrent test load. The test script now defaults
+to 100 ms; 20 ms remains selectable. Both sizes use corrected capture pacing:
+sleep before sending the captured chunk, then commit immediately after the
+short tail. The initial script sent each chunk before its sleep, giving the
+server an artificial head start; compare the fresh 20/100 ms results below
+instead of attributing all differences from the initial results to chunk size.
+
+| STT chunk | Commit to final, each run (ms) | Median (ms) | Runs with partials |
+| --- | --- | ---: | ---: |
+| 20 ms | 120.80, 119.91, 122.29 | 120.80 | 0/3 |
+| 100 ms | 88.57, 90.91, 82.60 | 88.57 | 3/3 |
+
+All final transcripts matched the short phrase. 100 ms produced partials in
+all three runs; 20 ms produced none. This is an observed association in this
+small sample, not an established server-side explanation or a p99 guarantee.
+The first TTS call in each group used a new HTTP connection; later calls reused
+it. STT chunk size does not change the TTS request or its output buffering.
+
+Raw measurements: [chunk-size-results.json](chunk-size-results.json). The
+LiveKit first-partial clock starts before simulated audio capture; Pipecat's
+starts at the first audio frame processed (after the initial capture interval),
+so those partial offsets should not be compared directly between frameworks.
+
+A further 14.3-second utterance with 100 ms chunks also
+returned a partial and the correct full final transcript. Commit to final was
+93.14 ms (one run).

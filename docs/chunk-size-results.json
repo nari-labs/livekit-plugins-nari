@@ -1,0 +1,93 @@
+[
+  {
+    "run": 1,
+    "framework": "livekit",
+    "tts_model": "qwen3-tts-fast",
+    "stt_model": "qwen3-asr-fast",
+    "stt_chunk_ms": 20,
+    "tts_first_frame_ms": 232.9,
+    "tts_complete_ms": 415.97,
+    "audio_seconds": 3.013,
+    "stt_first_partial_ms": null,
+    "stt_commit_to_final_ms": 120.8,
+    "transcript": "Hello. This is a test of Nari speech recognition."
+  },
+  {
+    "run": 2,
+    "framework": "livekit",
+    "tts_model": "qwen3-tts-fast",
+    "stt_model": "qwen3-asr-fast",
+    "stt_chunk_ms": 20,
+    "tts_first_frame_ms": 108.01,
+    "tts_complete_ms": 280.9,
+    "audio_seconds": 3.013,
+    "stt_first_partial_ms": null,
+    "stt_commit_to_final_ms": 119.91,
+    "transcript": "Hello. This is a test of Nari speech recognition."
+  },
+  {
+    "run": 3,
+    "framework": "livekit",
+    "tts_model": "qwen3-tts-fast",
+    "stt_model": "qwen3-asr-fast",
+    "stt_chunk_ms": 20,
+    "tts_first_frame_ms": 95.35,
+    "tts_complete_ms": 278.82,
+    "audio_seconds": 3.013,
+    "stt_first_partial_ms": null,
+    "stt_commit_to_final_ms": 122.29,
+    "transcript": "Hello. This is a test of Nari speech recognition."
+  },
+  {
+    "run": 1,
+    "framework": "livekit",
+    "tts_model": "qwen3-tts-fast",
+    "stt_model": "qwen3-asr-fast",
+    "stt_chunk_ms": 100,
+    "tts_first_frame_ms": 217.19,
+    "tts_complete_ms": 401.54,
+    "audio_seconds": 3.013,
+    "stt_first_partial_ms": 1915.06,
+    "stt_commit_to_final_ms": 88.57,
+    "transcript": "Hello. This is a test of Nari speech recognition."
+  },
+  {
+    "run": 2,
+    "framework": "livekit",
+    "tts_model": "qwen3-tts-fast",
+    "stt_model": "qwen3-asr-fast",
+    "stt_chunk_ms": 100,
+    "tts_first_frame_ms": 95.1,
+    "tts_complete_ms": 279.68,
+    "audio_seconds": 3.013,
+    "stt_first_partial_ms": 1916.37,
+    "stt_commit_to_final_ms": 90.91,
+    "transcript": "Hello. This is a test of Nari speech recognition."
+  },
+  {
+    "run": 3,
+    "framework": "livekit",
+    "tts_model": "qwen3-tts-fast",
+    "stt_model": "qwen3-asr-fast",
+    "stt_chunk_ms": 100,
+    "tts_first_frame_ms": 95.6,
+    "tts_complete_ms": 284.85,
+    "audio_seconds": 3.013,
+    "stt_first_partial_ms": 1907.16,
+    "stt_commit_to_final_ms": 82.6,
+    "transcript": "Hello. This is a test of Nari speech recognition."
+  },
+  {
+    "run": 1,
+    "framework": "livekit",
+    "tts_model": "qwen3-tts-fast",
+    "stt_model": "qwen3-asr-fast",
+    "stt_chunk_ms": 100,
+    "tts_first_frame_ms": 230.23,
+    "tts_complete_ms": 1195.79,
+    "audio_seconds": 14.309,
+    "stt_first_partial_ms": 1906.46,
+    "stt_commit_to_final_ms": 93.14,
+    "transcript": "Hello. This is a longer test of Nari speech recognition. We are checking that audio arrives quickly, that words are recognized while the speaker is still talking, and that the final transcript appears promptly after the sentence ends. Thank you for listening."
+  }
+]

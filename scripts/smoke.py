@@ -14,6 +14,7 @@ from livekit.plugins import nari
 
 async def run(args):
     load_dotenv(args.env_file)
+    chunk_bytes = 16000 * 2 * args.chunk_ms // 1000
     async with nari.TTS(model=args.tts_model, voice=args.voice) as speaker:
         for index in range(args.runs):
             started = time.perf_counter()
@@ -41,10 +42,15 @@ async def run(args):
 
                     async def send(pcm=pcm, audio_started=audio_started, output=output):
                         nonlocal committed_at
-                        # Pace 20 ms frames like a microphone, including the last frame.
+                        # Wait for capture before sending each chunk; flush the short tail
+                        # at its actual end, without padding or waiting for a full chunk.
                         sent = 0
-                        for start in range(0, len(pcm), 640):
-                            chunk = pcm[start : start + 640]
+                        for start in range(0, len(pcm), chunk_bytes):
+                            chunk = pcm[start : start + chunk_bytes]
+                            sent += len(chunk)
+                            await asyncio.sleep(
+                                max(0, audio_started + sent / 32000 - time.perf_counter())
+                            )
                             output.push_frame(
                                 rtc.AudioFrame(
                                     data=chunk,
@@ -52,10 +58,6 @@ async def run(args):
                                     num_channels=1,
                                     samples_per_channel=len(chunk) // 2,
                                 )
-                            )
-                            sent += len(chunk)
-                            await asyncio.sleep(
-                                max(0, audio_started + sent / 32000 - time.perf_counter())
                             )
                         committed_at = time.perf_counter()
                         output.end_input()
@@ -85,6 +87,7 @@ async def run(args):
                         "framework": "livekit",
                         "tts_model": args.tts_model,
                         "stt_model": args.stt_model,
+                        "stt_chunk_ms": args.chunk_ms,
                         "tts_first_frame_ms": round((first - started) * 1000, 2),
                         "tts_complete_ms": round(synthesis_ms, 2),
                         "audio_seconds": round(len(pcm) / 32000, 3),
@@ -103,6 +106,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", default=".env")
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--chunk-ms", type=int, choices=(20, 100), default=100)
     parser.add_argument("--tts-model", default="qwen3-tts-fast")
     parser.add_argument("--stt-model", default="qwen3-asr-fast")
     parser.add_argument("--voice", default="diana")
